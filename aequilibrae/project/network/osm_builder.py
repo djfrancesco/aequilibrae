@@ -4,6 +4,9 @@ import gc
 from typing import List
 import importlib.util as iutil
 import numpy as np
+import pandas as pd
+from shapely.geometry import Point, LineString
+
 from aequilibrae.project.network.link_types import LinkTypes
 from .haversine import haversine
 from aequilibrae import logger
@@ -37,9 +40,9 @@ class OSMBuilder(WorkerThread):
         self.__model_link_types = []
         self.__model_link_type_ids = []
         self.__link_type_quick_reference = {}
-        self.nodes = {}
-        self.links = {}
-        self.insert_qry = """INSERT INTO {} ({}, geometry) VALUES({}, GeomFromText(?, 4326))"""
+        self.nodes = pd.DataFrame([])
+        self.links = pd.DataFrame([])
+        self.insert_qry = """INSERT INTO {} ({}, geometry) VALUES({}, GeomFromWKB(?, 4326))"""
 
     def __emit_all(self, *args):
         if pyqt:
@@ -80,18 +83,24 @@ class OSMBuilder(WorkerThread):
         self.__emit_all(["text", "Setting data structures for nodes"])
         self.__emit_all(["maxValue", len(n)])
 
+        all_nodes = {}
         for i, node in enumerate(n):
             nid = node.pop("id")
             _ = node.pop("type")
-            self.nodes[nid] = node
+            node['geo'] = Point([node['lon'], node['lat']])
+            all_nodes[nid] = node
+
             self.__emit_all(["Value", i])
-        del n
+
+        self.nodes = pd.DataFrame(all_nodes).transpose()
+        del all_nodes
 
         logger.info("Setting data structures for links")
         self.__emit_all(["text", "Setting data structures for links"])
         self.__emit_all(["maxValue", len(alinks)])
 
         all_nodes = []
+        self.links = {}
         for i, link in enumerate(alinks):
             osm_id = link.pop("id")
             _ = link.pop("type")
@@ -103,90 +112,135 @@ class OSMBuilder(WorkerThread):
         logger.info("Finalizing data structures")
         self.__emit_all(["text", "Finalizing data structures"])
 
-        node_count = self.unique_count(np.array(all_nodes))
-
-        return node_count
+        return self.unique_count(np.array(all_nodes))
 
     def importing_links(self, node_count):
-        node_ids = {}
 
-        vars = {}
-        vars["link_id"] = 1
+        self.__pre_process_links(node_count)
+        self.__build_link_types()
         table = "links"
         fields = self.get_link_fields()
+        all_fields = fields + ['geometry']
         self.__update_table_structure()
         field_names = ",".join(fields)
 
+        missing_fields = {x: 0 for x in fields if x not in self.links.columns}
+        self.links = self.links.assign(**missing_fields)
+
         logger.info("Adding network links")
         self.__emit_all(["text", "Adding network links"])
-        L = len(list(self.links.keys()))
+        L = self.links.shape[0]
         self.__emit_all(["maxValue", L])
 
-        counter = 0
-        mode_codes, not_found_tags = self.modes_per_link_type()
-        owf, twf = self.field_osm_source()
+        links_sql = self.insert_qry.format(table, field_names, ','.join(['?'] * (len(fields))))
+        all_link_data = []
 
-        for osm_id, link in self.links.items():
+        self.links = self.links[all_fields]
+        self.links.direction = self.links.direction.astype(int)
+        for counter, link in self.links.iterrows():
             self.__emit_all(["Value", counter])
-            counter += 1
-            if counter % 1000 == 0:
-                logger.info(f'Inserting segments from {counter:,} out of {L:,} OSM link objects')
-            vars["osm_id"] = osm_id
-            vars['link_type'] = 'default'
-            linknodes = link["nodes"]
+            data = list(link.values)
+            all_link_data.append(data)
+            if (counter + 1) % 1000 == 0:
+                self.__emit_all(["text", "Adding link chunk"])
+                self.conn.executemany(links_sql, all_link_data)
+                all_link_data = []
+                logger.info(f'Adding links from {counter + 1:,} out of {L:,}')
+                self.__emit_all(["text", "Building segments"])
+
+        logger.info('Starting link insert')
+        self.conn.executemany(links_sql, all_link_data)
+        logger.info('Finished inserting links')
+        self.conn.commit()
+
+        #     if len(vars["modes"]) > 0:
+        #         for i in range(segments):
+        #             attributes = self.__build_link_data(vars, intersections, i, linknodes, node_ids, fields)
+        #             try:
+        #                 self.curr.execute(links_sql, attributes)
+        #                 self.curr.execute('Select a_node, b_node from links where link_id=?', [vars["link_id"]])
+        #                 a, b = self.curr.fetchone()
+        #                 self.curr.executemany('update nodes set osm_id=? where node_id=?',
+        #                                       [[linknodes[intersections[i]], a], [linknodes[intersections[i + 1]], b]])
+        #             except Exception as e:
+        #                 data = list(vars.values())
+        #                 logger.error("error when inserting link {}. Error {}".format(data, e.args))
+        #                 logger.error(links_sql)
+        #             vars["link_id"] += 1
+        #         self.conn.commit()
+        #     self.__emit_all(["text", f"{counter:,} of {L:,} super links added"])
+        #     self.links[osm_id] = []
+        # self.conn.commit()
+        # self.curr.close()
+
+    def __pre_process_links(self, node_count):
+
+        self.__update_table_structure()
+
+        logger.info("Pre-processing links")
+        self.__emit_all(["text", "Pre-processing links"])
+        L = len(self.links)
+        self.__emit_all(["maxValue", L])
+
+        mode_codes, not_found_tags = self.modes_per_link_type()
+        owf, twf = self.__field_osm_source()
+
+        data = []
+        for counter, (osm_id, link) in enumerate(self.links.items()):
             linktags = link["tags"]
 
-            indices = np.searchsorted(node_count[:, 0], linknodes)
-            nodedegree = node_count[indices, 1]
+            self.__emit_all(["Value", counter])
+            if (counter + 1) % 1000 == 0:
+                logger.info(f'Building segments from {counter + 1:,} out of {L:,} OSM link objects')
 
-            # Makes sure that beginning and end are end nodes for a link
-            nodedegree[0] = 2
-            nodedegree[-1] = 2
+            vars = {"osm_id": osm_id,
+                    'nodes': [link['nodes']],
+                    "modes": mode_codes.get(linktags.get("highway"), not_found_tags),
+                    'oneway': linktags.get("oneway", "no"),
+                    'highway': linktags.get("highway")}
 
-            intersections = np.where(nodedegree > 1)[0]
-            segments = intersections.shape[0] - 1
-
-            # Attributes that are common to all individual links/segments
-            vars["direction"] = (linktags.get("oneway") == "yes") * 1
+            if not len(vars["modes"]):
+                continue
 
             for k, v in owf.items():
                 vars[k] = linktags.get(v)
 
             for k, v in twf.items():
                 val = linktags.get(v["osm_source"])
-                if vars["direction"] == 0:
-                    for d1, d2 in [("ab", "forward"), ("ba", "backward")]:
-                        vars[f"{k}_{d1}"] = self.__get_link_property(d2, val, linktags, v)
-                elif vars["direction"] == -1:
-                    vars[f"{k}_ba"] = linktags.get(f"{v['osm_source']}:{'backward'}", val)
-                elif vars["direction"] == 1:
-                    vars[f"{k}_ab"] = linktags.get(f"{v['osm_source']}:{'forward'}", val)
+                if linktags.get("oneway") != "yes":
+                    continue
+                for d1, d2 in [("ab", "forward"), ("ba", "backward")]:
+                    vars[f"{k}_{d1}"] = self.__get_link_property(d2, val, linktags, v)
 
-            vars["modes"] = mode_codes.get(linktags.get("highway"), not_found_tags)
+            df = pd.DataFrame(vars["nodes"][0], columns=['node_id'])
+            df = df.merge(node_count, how='left', on='node_id').reset_index(drop=True)
+            df.fillna(value=0, inplace=True)
+            df.records.values[0] += 2
+            df.records.values[-1] += 2
 
-            vars['link_type'] = self.__link_type_quick_reference.get(vars['link_type'].lower(),
-                                                                     self.__repair_link_type(vars['link_type']))
+            intersections = np.array(df[df.records >= 2].index.values)
+            intersections[-1] += 1
+            for i, j in zip(intersections[:-1], intersections[1:]):
+                nodes = df.loc[i:j, 'node_id']
+                geo = LineString(self.nodes.loc[nodes.values, 'geo'].tolist())
+                vars['geometry'] = geo.wkb
+                vars['distance'] = geo.length * 111000  # Approximate value, will be corrected by triggers
+                data.append(pd.DataFrame(vars))
+        self.__emit_all(["text", f"All {L:,} super links were pre-processed"])
+        self.links = pd.concat(data).assign(direction=0)
+        self.links = self.links.assign(link_id=np.arange(self.links.shape[0]) + 1, a_node=1, b_node=1)
+        if 'oneway' in self.links:
+            self.links.loc[self.links.oneway.str.lower() == 'yes', 'direction'] = 1
 
-            if len(vars["modes"]) > 0:
-                for i in range(segments):
-                    attributes = self.__build_link_data(vars, intersections, i, linknodes, node_ids, fields)
-                    sql = self.insert_qry.format(table, field_names, ','.join(['?'] * (len(attributes) - 1)))
-                    try:
-                        self.curr.execute(sql, attributes)
-                        self.curr.execute('Select a_node, b_node from links where link_id=?', [vars["link_id"]])
-                        a, b = self.curr.fetchone()
-                        self.curr.executemany('update nodes set osm_id=? where node_id=?',
-                                              [[linknodes[intersections[i]], a], [linknodes[intersections[i + 1]], b]])
-                    except Exception as e:
-                        data = list(vars.values())
-                        logger.error("error when inserting link {}. Error {}".format(data, e.args))
-                        logger.error(sql)
-                    vars["link_id"] += 1
-                self.conn.commit()
-            self.__emit_all(["text", f"{counter:,} of {L:,} super links added"])
-            self.links[osm_id] = []
-        self.conn.commit()
-        self.curr.close()
+    def __build_link_types(self):
+        data = []
+        missing_link_types = self.links.highway.unique()
+        logger.info(f'We will need to add {len(missing_link_types)} new link types to the model database')
+        for link_type in missing_link_types:
+            data.append([link_type, self.__repair_link_type(link_type)])
+        df = pd.DataFrame(data, columns=['highway', 'link_type'])
+        self.links = self.links.drop(columns=['link_type']).merge(df, on='highway')
+        self.links.drop(columns=['highway', 'oneway'], inplace=True)
 
     def __worksetup(self):
         self.__link_types = LinkTypes(self)
@@ -287,7 +341,9 @@ class OSMBuilder(WorkerThread):
         unique, inverse = np.unique(a, return_inverse=True)
         count = np.zeros(len(unique), int)
         np.add.at(count, inverse, 1)
-        return np.vstack((unique, count)).T
+        df = pd.DataFrame(np.vstack((unique, count)).T, columns=['node_id', 'records'])
+        df = df[df.records > 1]
+        return df
 
     @staticmethod
     def get_link_fields():
@@ -317,7 +373,7 @@ class OSMBuilder(WorkerThread):
                     return tp[field_name]['type']
 
     @staticmethod
-    def field_osm_source():
+    def __field_osm_source():
         p = Parameters()
         fields = p.parameters["network"]["links"]["fields"]
 
