@@ -77,7 +77,7 @@ class LinkTypes:
         for key in to_del:
             del self.__items[key]
 
-    def new(self, link_type_id: str) -> LinkType:
+    def new(self, link_type_id: str, warning_not_saved=True) -> LinkType:
         if link_type_id in self.__items:
             raise ValueError(f'Link Type ID ({link_type_id}) already exists in the model. It must be unique.')
 
@@ -85,7 +85,8 @@ class LinkTypes:
         tp['link_type_id'] = link_type_id
         lt = LinkType(tp)
         self.__items[link_type_id] = lt
-        logger.warning('Link type has not yet been saved to the database. Do so explicitly')
+        if warning_not_saved:
+            logger.warning('Link type has not yet been saved to the database. Do so explicitly')
         return lt
 
     def delete(self, link_type_id: str) -> None:

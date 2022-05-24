@@ -127,6 +127,15 @@ class OSMBuilder(WorkerThread):
         missing_fields = {x: 0 for x in fields if x not in self.links.columns}
         self.links = self.links.assign(**missing_fields)
 
+        p = Parameters()
+        min_node = p.parameters["network"]["osm"]["minimum_node_id"]
+
+        logger.info("Adding network nodes")
+        nodes = self.nodes.drop_duplicates(subset=['lat', 'lon']).sort_index()
+        nodes = [[min_node + i, idx, rec.geo.wkb] for i, (idx, rec) in enumerate(nodes.iterrows())]
+        self.conn.executemany('insert into nodes(node_id, osm_id, geometry) values(?, ?, geomfromWKB(?,4326));', nodes)
+        del nodes
+
         logger.info("Adding network links")
         self.__emit_all(["text", "Adding network links"])
         L = self.links.shape[0]
@@ -135,6 +144,7 @@ class OSMBuilder(WorkerThread):
         links_sql = self.insert_qry.format(table, field_names, ','.join(['?'] * (len(fields))))
         all_link_data = []
 
+        self.conn.commit()
         self.links = self.links[all_fields]
         self.links.direction = self.links.direction.astype(int)
         for counter, link in self.links.iterrows():
@@ -153,25 +163,11 @@ class OSMBuilder(WorkerThread):
         logger.info('Finished inserting links')
         self.conn.commit()
 
-        #     if len(vars["modes"]) > 0:
-        #         for i in range(segments):
-        #             attributes = self.__build_link_data(vars, intersections, i, linknodes, node_ids, fields)
-        #             try:
-        #                 self.curr.execute(links_sql, attributes)
-        #                 self.curr.execute('Select a_node, b_node from links where link_id=?', [vars["link_id"]])
-        #                 a, b = self.curr.fetchone()
-        #                 self.curr.executemany('update nodes set osm_id=? where node_id=?',
-        #                                       [[linknodes[intersections[i]], a], [linknodes[intersections[i + 1]], b]])
-        #             except Exception as e:
-        #                 data = list(vars.values())
-        #                 logger.error("error when inserting link {}. Error {}".format(data, e.args))
-        #                 logger.error(links_sql)
-        #             vars["link_id"] += 1
-        #         self.conn.commit()
-        #     self.__emit_all(["text", f"{counter:,} of {L:,} super links added"])
-        #     self.links[osm_id] = []
-        # self.conn.commit()
-        # self.curr.close()
+        logger.info('Cleaning node insertion')
+        self.conn.execute('''Delete from Nodes where node_id not in (select a_node from links
+                                                                     union all
+                                                                     select b_node from links);''')
+        self.conn.commit()
 
     def __pre_process_links(self, node_count):
 
@@ -316,7 +312,7 @@ class OSMBuilder(WorkerThread):
                 for letter in string.ascii_letters:
                     if letter not in self.__model_link_type_ids:
                         break
-        lt = self.__link_types.new(letter)
+        lt = self.__link_types.new(letter, False)
         lt.link_type = link_type
         lt.description = f"Link types from Open Street Maps: {original_link_type}"
         lt.save()

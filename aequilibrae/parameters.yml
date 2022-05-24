@@ -198,6 +198,7 @@ network:
         mode_filter:
           pedestrian: 'no'
         unknown_tags: true
+    minimum_node_id: 30000
 osm:
     overpass_endpoint: "http://overpass-api.de/api"
     nominatim_endpoint: "https://nominatim.openstreetmap.org/"
