@@ -110,12 +110,11 @@ class Graph(object):
             raise ValueError("Centroids need to be a NumPy array of integers 64 bits")
         if not np.issubdtype(centroids.dtype, np.integer):
             raise ValueError("Centroids need to be a NumPy array of integers 64 bits")
-        if centroids.shape[0] == 0:
-            raise ValueError("You need at least one centroid")
-        if centroids.min() <= 0:
-            raise ValueError("Centroid IDs need to be positive")
-        if centroids.shape[0] != np.unique(centroids).shape[0]:
-            raise ValueError("Centroid IDs are not unique")
+        if centroids.shape[0] > 0:
+            if centroids.min() <= 0:
+                raise ValueError("Centroid IDs need to be positive")
+            if centroids.shape[0] != np.unique(centroids).shape[0]:
+                raise ValueError("Centroid IDs are not unique")
         self.centroids = np.array(centroids, np.uint32)
 
         properties = self.__build_directed_graph(self.network, centroids)
