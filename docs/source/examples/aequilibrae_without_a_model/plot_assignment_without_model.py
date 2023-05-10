@@ -22,7 +22,7 @@ from aequilibrae.paths import TrafficAssignment
 from aequilibrae.paths.traffic_class import TrafficClass
 
 # %%
-# We load the example file from the GMNS GitHub repository
+# We load the example file from the TNTP GitHub repository
 net_file = "https://raw.githubusercontent.com/bstabler/TransportationNetworks/master/SiouxFalls/SiouxFalls_net.tntp"
 
 demand_file = "https://raw.githubusercontent.com/bstabler/TransportationNetworks/master/SiouxFalls/CSV-data/SiouxFalls_od.csv"
@@ -76,8 +76,10 @@ network["link_id"] = network.index + 1
 network = network.astype({"a_node":"int64", "b_node": "int64"})
 
 #%%
-# Let's build our Graph! In case you're in doubt about the Graph, `click here <aequilibrae-graphs>`
+# Let's build our Graph! In case you're in doubt about the Graph, you can
+# :ref:`click here <aequilibrae-graphs>`
 # to read more about it.
+
 # %%
 g = Graph()
 g.cost = network['free_flow_time'].values
