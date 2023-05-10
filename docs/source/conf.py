@@ -46,20 +46,6 @@ else:
 
 json_url = "https://aequilibrae.com/python/dev/_static/switcher.json"
 
-# Define the version we use for matching in the version switcher.
-version_match = os.environ.get("READTHEDOCS_VERSION")
-# If READTHEDOCS_VERSION doesn't exist, we're not on RTD
-# If it is an integer, we're in a PR build and the version isn't correct.
-if not version_match or version_match.isdigit():
-    # For local development, infer the version to match from the package.
-    if "dev" in version:
-        switcher_version = "latest"
-        # We want to keep the relative reference if we are in dev mode
-        # but we want the whole url if we are effectively in a released version
-        json_url = "/_static/switcher.json"
-    else:
-        switcher_version = "V." + version
-
 # -- General configuration ---------------------------------------------------
 
 # If your documentation needs a minimal Sphinx version, state it here.
@@ -143,7 +129,6 @@ html_theme_options = {
     "show_nav_level": 0,
     "github_url": "https://github.com/AequilibraE/aequilibrae",
     "navbar_end": ["theme-switcher", "version-switcher"],
-    "version_dropdown": True,
     "switcher": {
         "json_url": json_url,
         "version_match": switcher_version,
